@@ -4,7 +4,7 @@ This is a small website that helps students and admins manage exam seating.
 Students can see their seats, and admins can add students, rooms, and exams.
 
 ## Website Video
-<video src="demo.mp4" controls width="600"></video>
+[![Watch the video](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
 
 ## What the Website Does
 
