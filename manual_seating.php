@@ -12,26 +12,28 @@ if (!$exam) {
 $success = '';
 $error = '';
 
-// Clear all manual assignments for this exam when page loads (fresh start)
+//Clear all manual assignments for this exam when page loads 
 if (!isset($_SESSION['manual_cleared_' . $exam_id])) {
     $conn->query("DELETE FROM seating_arrangements WHERE exam_id = $exam_id");
     $_SESSION['manual_cleared_' . $exam_id] = true;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_seat'])) {
+if($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_seat'])) {
     $student_id = intval($_POST['student_id']);
     $room_id = intval($_POST['room_id']);
     $row = intval($_POST['row_position']);
     $col = intval($_POST['column_position']);
     
-    // Validate room is assigned to this exam
-    if ($exam['room_id'] != $room_id) {
-        $error = "This room is not assigned to this exam! Please select the correct room from the exam settings.";
-    } else {
+    //Validate room is assigned to this exam
+    if($exam['room_id'] != $room_id){
+        $error = "This room is not assigned to this exam!";
+    } 
+    else 
+        {
         $student = $conn->query("SELECT * FROM students WHERE id = $student_id")->fetch_assoc();
         $room = $conn->query("SELECT * FROM rooms WHERE id = $room_id")->fetch_assoc();
         
-        // Check if student already assigned for this exam
+        //Check if student already assigned for this exam
         $already_assigned = $conn->query("
             SELECT id, seat_number FROM seating_arrangements 
             WHERE exam_id = $exam_id AND student_id = $student_id
@@ -39,95 +41,84 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_seat'])) {
         
         if ($already_assigned->num_rows > 0) {
             $existing = $already_assigned->fetch_assoc();
-            $error = "⚠️ This student is already assigned to seat {$existing['seat_number']}! Remove them first.";
-        } else {
-            // Check if seat is occupied by THIS exam
-            $check_existing = $conn->query("
-                SELECT s.name, s.roll_number FROM seating_arrangements sa
-                INNER JOIN students s ON sa.student_id = s.id
-                WHERE sa.exam_id = $exam_id AND sa.room_id = $room_id 
-                AND sa.row_position = $row AND sa.column_position = $col
-            ");
-            
-            if ($check_existing->num_rows > 0) {
-                $occupant = $check_existing->fetch_assoc();
-                $error = "⚠️ This seat is already occupied by {$occupant['roll_number']} - {$occupant['name']} for this exam!";
-            } else {
-                // NEW: Check if seat is occupied by OTHER exams at the same date/time
-                $conflict_check = $conn->query("
-                    SELECT e.exam_name, e.exam_date, e.start_time, s.name, s.roll_number
+            $error = " This student is already assigned to seat {$existing['seat_number']}!";
+        } 
+        else{
+            //Check room boundaries
+            if($row < 0 || $row >= $room['total_rows'] || $col < 0 || $col >= $room['total_columns']) {
+                $error = "Invalid seat position!";
+            } 
+            else{
+                //CHECK 1 that Is this physical seat occupied by ANY exam?
+                $check_any_exam = $conn->query("
+                    SELECT e.exam_name, s.name, s.roll_number 
                     FROM seating_arrangements sa
                     INNER JOIN exams e ON sa.exam_id = e.id
                     INNER JOIN students s ON sa.student_id = s.id
                     WHERE sa.room_id = $room_id 
                     AND sa.row_position = $row 
                     AND sa.column_position = $col
-                    AND sa.exam_id != $exam_id
-                    AND e.exam_date = '{$exam['exam_date']}'
-                    AND e.status = 'scheduled'
-                    AND (
-                        (e.start_time <= '{$exam['start_time']}' AND DATE_ADD(e.start_time, INTERVAL e.duration MINUTE) > '{$exam['start_time']}')
-                        OR
-                        (e.start_time < DATE_ADD('{$exam['start_time']}', INTERVAL {$exam['duration']} MINUTE) AND e.start_time >= '{$exam['start_time']}')
-                    )
                 ");
                 
-                if ($conflict_check && $conflict_check->num_rows > 0) {
-                    $conflict = $conflict_check->fetch_assoc();
-                    $error = "⚠️ CONFLICT: This seat is already booked for another exam ({$conflict['exam_name']}) at the same time! Student: {$conflict['roll_number']} - {$conflict['name']}";
+                if ($check_any_exam->num_rows > 0) {
+                    $occupant = $check_any_exam->fetch_assoc();
+                    $error = " This seat is already occupied by {$occupant['roll_number']} - {$occupant['name']} (Exam: {$occupant['exam_name']})!";
                 } else {
-                    // Check room boundaries
-                    if ($row < 0 || $row >= $room['total_rows'] || $col < 0 || $col >= $room['total_columns']) {
-                        $error = "Invalid seat position!";
-                    } else {
-                        // Check adjacent seats for same department/semester conflict
-                        $positions = [
-                            [$row, $col - 1], [$row, $col + 1],
-                            [$row - 1, $col], [$row + 1, $col]
-                        ];
+                    // CHECK 2: Are adjacent seats occupied by THIS SAME EXAM?
+                    $adjacent_positions = [
+                        [$row-1, $col],     // Above
+                        [$row+1, $col],     // Below
+                        [$row, $col-1],     // Left
+                        [$row, $col+1]      // Right
+                    ];
+                    
+                    $conflict = false;
+                    $conflict_msg = '';
+                    
+                    foreach ($adjacent_positions as $pos) {
+                        list($cr, $cc) = $pos;
                         
-                        $conflict = false;
-                        $conflict_msg = '';
-                        
-                        foreach ($positions as $pos) {
-                            list($cr, $cc) = $pos;
-                            if ($cc < 0 || $cc >= $room['total_columns'] || $cr < 0 || $cr >= $room['total_rows']) continue;
-                            
-                            $check = $conn->query("
-                                SELECT s.name, s.roll_number, s.department, s.semester 
-                                FROM seating_arrangements sa
-                                INNER JOIN students s ON sa.student_id = s.id
-                                WHERE sa.exam_id = $exam_id AND sa.room_id = $room_id 
-                                AND sa.row_position = $cr AND sa.column_position = $cc
-                            ");
-                            
-                            if ($check->num_rows > 0) {
-                                $neighbor = $check->fetch_assoc();
-                                if ($neighbor['department'] === $student['department'] && 
-                                    intval($neighbor['semester']) === intval($student['semester'])) {
-                                    $conflict = true;
-                                    $conflict_msg = "⚠️ Warning: {$neighbor['roll_number']} ({$neighbor['name']}) from same department/semester is at seat " . chr(65 + $cr) . ($cc + 1);
-                                    break;
-                                }
-                            }
+                        // Skip if out of bounds
+                        if ($cc < 0 || $cc >= $room['total_columns'] || 
+                            $cr < 0 || $cr >= $room['total_rows']) {
+                            continue;
                         }
                         
-                        if ($conflict) {
-                            $error = $conflict_msg;
+                        // Check if adjacent seat has a student from THIS exam
+                        $check = $conn->query("
+                            SELECT s.name, s.roll_number 
+                            FROM seating_arrangements sa
+                            INNER JOIN students s ON sa.student_id = s.id
+                            WHERE sa.exam_id = $exam_id 
+                            AND sa.room_id = $room_id 
+                            AND sa.row_position = $cr 
+                            AND sa.column_position = $cc
+                        ");
+                        
+                        if ($check->num_rows > 0) {
+                            $neighbor = $check->fetch_assoc();
+                            $conflict = true;
+                            $conflict_msg = " Cannot assign: {$neighbor['roll_number']} ({$neighbor['name']}) from the SAME EXAM is at adjacent seat " . chr(65 + $cr) . ($cc + 1);
+                            break;
+                        }
+                    }
+                    
+                    if ($conflict) {
+                        $error = $conflict_msg;
+                    } else {
+                        // All checks passed - assign student
+                        $seat_number = chr(65 + $row) . ($col + 1);
+                        $stmt = $conn->prepare("
+                            INSERT INTO seating_arrangements 
+                            (exam_id, student_id, room_id, seat_number, row_position, column_position) 
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ");
+                        $stmt->bind_param("iiisii", $exam_id, $student_id, $room_id, $seat_number, $row, $col);
+                        
+                        if ($stmt->execute()) {
+                            $success = " {$student['roll_number']} assigned to seat $seat_number successfully!";
                         } else {
-                            $seat_number = chr(65 + $row) . ($col + 1);
-                            $stmt = $conn->prepare("
-                                INSERT INTO seating_arrangements 
-                                (exam_id, student_id, room_id, seat_number, row_position, column_position, is_manual) 
-                                VALUES (?, ?, ?, ?, ?, ?, 1)
-                            ");
-                            $stmt->bind_param("iiisii", $exam_id, $student_id, $room_id, $seat_number, $row, $col);
-                            
-                            if ($stmt->execute()) {
-                                $success = "✅ {$student['roll_number']} assigned to seat $seat_number successfully!";
-                            } else {
-                                $error = "Database error: " . $conn->error;
-                            }
+                            $error = "Database error: " . $conn->error;
                         }
                     }
                 }
@@ -139,7 +130,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_seat'])) {
 if (isset($_POST['remove_seat'])) {
     $sa_id = intval($_POST['sa_id']);
     $conn->query("DELETE FROM seating_arrangements WHERE id = $sa_id AND exam_id = $exam_id");
-    $success = "✅ Student removed from seat";
+    $success = " Student removed from seat";
 }
 
 // Get students for this exam
@@ -190,7 +181,7 @@ if ($room) {
     ")->fetch_assoc()['cnt'];
     
     if ($other_exams > 0) {
-        $other_exams_warning = "⚠️ Warning: $other_exams other exam(s) scheduled in this room at overlapping times!";
+        $other_exams_warning = " Warning: $other_exams other exam(s) scheduled in this room at overlapping times!";
     }
 }
 ?>
@@ -323,7 +314,7 @@ if ($room) {
                 <?php if ($room): ?>
                     <p style="color: white; font-weight: 600;">📍 Room: <?php echo htmlspecialchars($room['room_number']); ?> - <?php echo htmlspecialchars($room['building']); ?></p>
                 <?php else: ?>
-                    <p style="color: #ef4444; font-weight: 600;">⚠️ No room assigned to this exam! Please assign a room first.</p>
+                    <p style="color: #ef4444; font-weight: 600;"> No room assigned to this exam! Please assign a room first.</p>
                 <?php endif; ?>
             </div>
             <div style="display: flex; gap: 12px;">
